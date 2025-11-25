@@ -1,0 +1,9 @@
+# Prevent direct file access
+<Files *>
+    Deny from all
+</Files>
+
+# Allow CSS/JS only
+<FilesMatch "\.(js|css)$">
+    Allow from all
+</FilesMatch>

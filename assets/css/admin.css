@@ -1,0 +1,32 @@
+/* FortressWP Admin Panel Styles */
+
+.fortresswp-wrap h1 {
+    margin-bottom: 20px;
+}
+
+.fortresswp-wrap table.form-table th {
+    width: 250px;
+    vertical-align: top;
+}
+
+#fw-msg,
+#fw-verify-result {
+    background: #f9f9f9;
+    border: 1px solid #ddd;
+    padding: 12px;
+    margin-top: 15px;
+    white-space: pre-wrap;
+    max-height: 300px;
+    overflow-y: auto;
+}
+
+.fortresswp-wrap pre {
+    background: #fafafa;
+    border: 1px solid #ddd;
+    padding: 10px;
+}
+
+.fortresswp-wrap img {
+    border: 3px solid #eee;
+    padding: 5px;
+}
