@@ -16,9 +16,7 @@ class FW_AdminUI {
         add_action('admin_enqueue_scripts', array($this, 'enqueue_assets'));
     }
 
-    /** Load CSS + JS for admin panel */
     public function enqueue_assets($hook) {
-
         if (strpos($hook, 'fortresswp') === false) return;
 
         wp_enqueue_style(
@@ -37,245 +35,332 @@ class FW_AdminUI {
         );
 
         wp_localize_script('fortresswp-admin', 'fortresswp_admin', array(
-            'scan_nonce' => wp_create_nonce('fortresswp_scan_nonce'),
-            'totp_nonce' => wp_create_nonce('fortresswp_totp_nonce'),
-            'ajax_url'   => admin_url('admin-ajax.php')
+            'scan_nonce'  => wp_create_nonce('fortresswp_scan_nonce'),
+            'totp_nonce'  => wp_create_nonce('fortresswp_totp_nonce'),
+            'ajax_url'    => admin_url('admin-ajax.php')
         ));
     }
 
-    /** Register setting fields */
     public function register_settings() {
         register_setting(FortressWP::OPTION_KEY, FortressWP::OPTION_KEY, array($this, 'sanitize_settings'));
     }
 
-    /** Basic sanitization */
     public function sanitize_settings($input) {
         $existing = get_option(FortressWP::OPTION_KEY, array());
         if (!is_array($existing)) $existing = array();
 
+        $keys_text   = array('ai_api_key');
+        $keys_textarea = array('signature_sources','blocklist_sources','blocked_user_agents','manual_block_ips','manual_block_users');
+        $keys_int    = array('scan_chunk_size','max_login_attempts','lockout_minutes');
+        $keys_select = array('ai_provider');
+
         foreach ($input as $k => $v) {
-            switch ($k) {
-                case 'ai_endpoint':
-                case 'signature_sources':
-                case 'blocklist_sources':
-                case 'blocked_user_agents':
-                    $existing[$k] = esc_textarea($v);
-                    break;
 
-                case 'ai_api_key':
-                    $existing[$k] = sanitize_text_field($v);
-                    break;
-
-                case 'scan_chunk_size':
-                case 'max_login_attempts':
-                case 'lockout_minutes':
-                    $existing[$k] = intval($v);
-                    break;
+            if (in_array($k, $keys_text, true)) {
+                $existing[$k] = sanitize_text_field($v);
+            } elseif (in_array($k, $keys_int, true)) {
+                $existing[$k] = intval($v);
+            } elseif (in_array($k, $keys_textarea, true)) {
+                $existing[$k] = esc_textarea($v);
+            } elseif (in_array($k, $keys_select, true)) {
+                $allowed_providers = array('openai','openrouter','ollama','kingslee','custom');
+                $v = sanitize_text_field($v);
+                $existing[$k] = in_array($v, $allowed_providers, true) ? $v : 'openai';
+            } elseif ($k === 'ai_endpoint') {
+                // allow overriding endpoint (for custom provider)
+                $existing[$k] = esc_url_raw($v);
             }
         }
 
         return $existing;
     }
 
-    /** Create admin menu pages */
     public function register_menu() {
-
+        // Top-level like Wordfence
         add_menu_page(
             'FortressWP Security',
             'FortressWP',
             'manage_options',
-            'fortresswp',
+            'fortresswp_dashboard',
             array($this, 'page_dashboard'),
             'dashicons-shield'
         );
 
         add_submenu_page(
-            'fortresswp',
-            'TOTP Settings',
+            'fortresswp_dashboard',
+            'FortressWP Dashboard',
+            'Dashboard',
+            'manage_options',
+            'fortresswp_dashboard',
+            array($this, 'page_dashboard')
+        );
+
+        add_submenu_page(
+            'fortresswp_dashboard',
+            'Malware Scan',
+            'Scan',
+            'manage_options',
+            'fortresswp_scan',
+            array($this, 'page_scan')
+        );
+
+        add_submenu_page(
+            'fortresswp_dashboard',
+            'Firewall & Blocking',
+            'Firewall',
+            'manage_options',
+            'fortresswp_firewall',
+            array($this, 'page_firewall')
+        );
+
+        add_submenu_page(
+            'fortresswp_dashboard',
+            'TOTP 2FA',
             'TOTP 2FA',
             'manage_options',
             'fortresswp_totp',
             array($this, 'page_totp')
         );
+
+        add_submenu_page(
+            'fortresswp_dashboard',
+            'Settings',
+            'Settings',
+            'manage_options',
+            'fortresswp_settings',
+            array($this, 'page_settings')
+        );
     }
 
-    /** Dashboard page */
+    /* ========== PAGES ========== */
+
+    /** Simple dashboard – you can expand this later */
     public function page_dashboard() {
-        if (!current_user_can('manage_options')) return;
-
-        $opts = get_option(FortressWP::OPTION_KEY, []);
-
-        ?>
+        if (!current_user_can('manage_options')) return; ?>
         <div class="wrap fortresswp-wrap">
-
-            <h1>FortressWP — Security Dashboard</h1>
-
-            <form method="post" action="options.php">
-
-                <?php settings_fields(FortressWP::OPTION_KEY); ?>
-
-                <table class="form-table">
-
-                    <tr>
-                        <th><label>AI Endpoint</label></th>
-                        <td>
-                            <input type="url"
-                                   name="<?php echo FortressWP::OPTION_KEY; ?>[ai_endpoint]"
-                                   value="<?php echo esc_attr($opts['ai_endpoint'] ?? ''); ?>"
-                                   class="regular-text">
-                        </td>
-                    </tr>
-
-                    <tr>
-                        <th><label>AI API Key</label></th>
-                        <td>
-                            <input type="password"
-                                   name="<?php echo FortressWP::OPTION_KEY; ?>[ai_api_key]"
-                                   value="<?php echo esc_attr($opts['ai_api_key'] ?? ''); ?>"
-                                   class="regular-text">
-                        </td>
-                    </tr>
-
-                    <tr>
-                        <th>Signature Sources</th>
-                        <td>
-                            <textarea name="<?php echo FortressWP::OPTION_KEY; ?>[signature_sources]"
-                                      rows="4" class="large-text code"><?php
-                                echo esc_textarea($opts['signature_sources'] ?? '');
-                                ?></textarea>
-                        </td>
-                    </tr>
-
-                    <tr>
-                        <th>Blocklist Sources</th>
-                        <td>
-                            <textarea name="<?php echo FortressWP::OPTION_KEY; ?>[blocklist_sources]"
-                                      rows="4" class="large-text code"><?php
-                                echo esc_textarea($opts['blocklist_sources'] ?? '');
-                                ?></textarea>
-                        </td>
-                    </tr>
-
-                    <tr>
-                        <th>Scan Chunk Size</th>
-                        <td>
-                            <input type="number"
-                                   name="<?php echo FortressWP::OPTION_KEY; ?>[scan_chunk_size]"
-                                   value="<?php echo intval($opts['scan_chunk_size'] ?? 50); ?>"
-                                   min="5" max="500">
-                        </td>
-                    </tr>
-
-                    <tr>
-                        <th>Max Login Attempts</th>
-                        <td>
-                            <input type="number"
-                                   name="<?php echo FortressWP::OPTION_KEY; ?>[max_login_attempts]"
-                                   value="<?php echo intval($opts['max_login_attempts'] ?? 5); ?>"
-                                   min="1" max="20">
-                        </td>
-                    </tr>
-
-                    <tr>
-                        <th>Lockout Minutes</th>
-                        <td>
-                            <input type="number"
-                                   name="<?php echo FortressWP::OPTION_KEY; ?>[lockout_minutes]"
-                                   value="<?php echo intval($opts['lockout_minutes'] ?? 15); ?>"
-                                   min="1" max="180">
-                        </td>
-                    </tr>
-
-                    <tr>
-                        <th>Blocked User Agents</th>
-                        <td>
-                            <textarea name="<?php echo FortressWP::OPTION_KEY; ?>[blocked_user_agents]"
-                                      rows="4" class="large-text code"><?php
-                                echo esc_textarea($opts['blocked_user_agents'] ?? '');
-                                ?></textarea>
-                        </td>
-                    </tr>
-
-                </table>
-
-                <?php submit_button('Save Settings'); ?>
-
-            </form>
-
-            <hr>
-
-            <h2>Security Tools</h2>
-
-            <button id="fw-run-scan" class="button button-primary">Run Malware Scan</button>
-
-            <button id="fw-update-sigs" class="button">Update Signatures</button>
-            <button id="fw-update-blk" class="button">Update Blocklist</button>
-
-            <pre id="fw-msg"></pre>
-
+            <h1>FortressWP — Dashboard</h1>
+            <p>Welcome to FortressWP. Use the Scan, Firewall, TOTP, and Settings pages from the menu.</p>
         </div>
         <?php
     }
 
-    /** TOTP Page */
-    public function page_totp() {
+    /** Settings page: AI + advanced options */
+    public function page_settings() {
+        if (!current_user_can('manage_options')) return;
+        $opts = get_option(FortressWP::OPTION_KEY, array());
+        $provider = $opts['ai_provider'] ?? 'openai';
+        ?>
+        <div class="wrap fortresswp-wrap">
+            <h1>FortressWP — Settings</h1>
 
+            <form method="post" action="options.php">
+            <?php settings_fields(FortressWP::OPTION_KEY); ?>
+            <table class="form-table">
+
+                <tr>
+                    <th scope="row"><label for="fw-ai-provider">AI Provider</label></th>
+                    <td>
+                        <select id="fw-ai-provider" name="<?php echo FortressWP::OPTION_KEY; ?>[ai_provider]">
+                            <option value="openai"   <?php selected($provider,'openai'); ?>>OpenAI (ChatGPT)</option>
+                            <option value="openrouter" <?php selected($provider,'openrouter'); ?>>OpenRouter / Compatible API</option>
+                            <option value="ollama"   <?php selected($provider,'ollama'); ?>>Local Ollama Server</option>
+                            <option value="kingslee" <?php selected($provider,'kingslee'); ?>>Kingslee AI Cloud</option>
+                            <option value="custom"   <?php selected($provider,'custom'); ?>>Custom Endpoint</option>
+                        </select>
+                        <p class="description">Choose which AI backend to use for malware analysis.</p>
+                    </td>
+                </tr>
+
+                <tr>
+                    <th scope="row"><label for="fw-ai-endpoint">AI Endpoint</label></th>
+                    <td>
+                        <input type="url"
+                               id="fw-ai-endpoint"
+                               name="<?php echo FortressWP::OPTION_KEY; ?>[ai_endpoint]"
+                               class="regular-text"
+                               value="<?php echo esc_attr($opts['ai_endpoint'] ?? ''); ?>">
+                        <p class="description">
+                            This will auto-fill for known providers; override only if using "Custom Endpoint".
+                        </p>
+                    </td>
+                </tr>
+
+                <tr>
+                    <th scope="row"><label for="fw-ai-key">AI API Key</label></th>
+                    <td>
+                        <input type="password"
+                               id="fw-ai-key"
+                               name="<?php echo FortressWP::OPTION_KEY; ?>[ai_api_key]"
+                               class="regular-text"
+                               value="<?php echo esc_attr($opts['ai_api_key'] ?? ''); ?>">
+                        <p class="description">Your AI provider API key (e.g., OpenAI secret key).</p>
+                    </td>
+                </tr>
+
+                <tr>
+                    <th>Signature Sources</th>
+                    <td>
+                        <textarea name="<?php echo FortressWP::OPTION_KEY; ?>[signature_sources]"
+                                  rows="4" class="large-text code"><?php
+                            echo esc_textarea($opts['signature_sources'] ?? '');
+                        ?></textarea>
+                        <p class="description">One URL per line, each returning a list of malware signatures.</p>
+                    </td>
+                </tr>
+
+                <tr>
+                    <th>Blocklist Sources</th>
+                    <td>
+                        <textarea name="<?php echo FortressWP::OPTION_KEY; ?>[blocklist_sources]"
+                                  rows="4" class="large-text code"><?php
+                            echo esc_textarea($opts['blocklist_sources'] ?? '');
+                        ?></textarea>
+                        <p class="description">One URL per line, each returning a list of malicious IPs.</p>
+                    </td>
+                </tr>
+
+                <tr>
+                    <th>Scan Chunk Size</th>
+                    <td>
+                        <input type="number"
+                               name="<?php echo FortressWP::OPTION_KEY; ?>[scan_chunk_size]"
+                               value="<?php echo intval($opts['scan_chunk_size'] ?? 50); ?>"
+                               min="5" max="500">
+                        <p class="description">How many files to scan per background chunk.</p>
+                    </td>
+                </tr>
+
+                <tr>
+                    <th>Max Login Attempts</th>
+                    <td>
+                        <input type="number"
+                               name="<?php echo FortressWP::OPTION_KEY; ?>[max_login_attempts]"
+                               value="<?php echo intval($opts['max_login_attempts'] ?? 5); ?>"
+                               min="1" max="20">
+                    </td>
+                </tr>
+
+                <tr>
+                    <th>Lockout Minutes</th>
+                    <td>
+                        <input type="number"
+                               name="<?php echo FortressWP::OPTION_KEY; ?>[lockout_minutes]"
+                               value="<?php echo intval($opts['lockout_minutes'] ?? 15); ?>"
+                               min="1" max="180">
+                    </td>
+                </tr>
+
+                <tr>
+                    <th>Blocked User Agents</th>
+                    <td>
+                        <textarea name="<?php echo FortressWP::OPTION_KEY; ?>[blocked_user_agents]"
+                                  rows="4" class="large-text code"><?php
+                            echo esc_textarea($opts['blocked_user_agents'] ?? '');
+                        ?></textarea>
+                    </td>
+                </tr>
+
+            </table>
+
+            <?php submit_button('Save Settings'); ?>
+            </form>
+        </div>
+        <?php
+    }
+
+    /** Scan page (separate tab) */
+    public function page_scan() {
+        if (!current_user_can('manage_options')) return;
+        ?>
+        <div class="wrap fortresswp-wrap">
+            <h1>FortressWP — Malware Scanner</h1>
+
+            <p>Run a background scan of plugins and themes. Progress is shown live below.</p>
+
+            <button id="fw-run-scan" class="button button-primary">Start Scan</button>
+            <button id="fw-update-sigs" class="button">Update Signatures</button>
+            <button id="fw-update-blk" class="button">Update Blocklist</button>
+
+            <div id="fw-scan-progress-wrapper">
+                <div id="fw-scan-progress-bar"><span id="fw-scan-progress-fill"></span></div>
+                <div id="fw-scan-stats">
+                    <span id="fw-scan-count"></span>
+                    <span id="fw-scan-time"></span>
+                </div>
+                <div>Current file: <span id="fw-scan-current"></span></div>
+            </div>
+
+            <pre id="fw-msg"></pre>
+        </div>
+        <?php
+    }
+
+    /** Firewall / block UI page */
+    public function page_firewall() {
+        if (!current_user_can('manage_options')) return;
+        $opts = get_option(FortressWP::OPTION_KEY, array());
+        ?>
+        <div class="wrap fortresswp-wrap">
+            <h1>FortressWP — Firewall & Blocking</h1>
+
+            <form method="post" action="options.php">
+            <?php settings_fields(FortressWP::OPTION_KEY); ?>
+
+            <h2>Manual IP Block List</h2>
+            <p>Each IP on a separate line. These are blocked in addition to external blocklists.</p>
+            <textarea name="<?php echo FortressWP::OPTION_KEY; ?>[manual_block_ips]"
+                      rows="8" class="large-text code"><?php
+                echo esc_textarea($opts['manual_block_ips'] ?? '');
+            ?></textarea>
+
+            <h2>Blocked Usernames</h2>
+            <p>Each username on a separate line. These users will always be denied login.</p>
+            <textarea name="<?php echo FortressWP::OPTION_KEY; ?>[manual_block_users]"
+                      rows="8" class="large-text code"><?php
+                echo esc_textarea($opts['manual_block_users'] ?? '');
+            ?></textarea>
+
+            <?php submit_button('Save Firewall Rules'); ?>
+            </form>
+        </div>
+        <?php
+    }
+
+    /** TOTP page (unchanged except using existing FW_TOTP) */
+    public function page_totp() {
         if (!current_user_can('manage_options')) return;
 
         $user   = wp_get_current_user();
         $secret = get_user_meta($user->ID, 'fortresswp_totp_secret', true);
-
         if (!$secret) {
             $secret = FW_TOTP::generate_and_store($user->ID);
         }
 
         $otpauth = FW_TOTP::get_otpauth_url($user->user_login, $secret);
         $qr_url  = FW_TOTP::qr_code_url($otpauth);
-
-        $backups = get_user_meta($user->ID, 'fortresswp_totp_backup', true);
-        if (!is_array($backups)) $backups = [];
-
+        $codes   = get_user_meta($user->ID, 'fortresswp_totp_backup', true);
+        if (!is_array($codes)) $codes = array();
         ?>
         <div class="wrap fortresswp-wrap">
-            <h1>TOTP Two-Factor Authentication</h1>
+            <h1>FortressWP — TOTP 2FA</h1>
 
-            <p>Scan this QR code with your authenticator app:</p>
-
-            <img src="<?php echo esc_attr($qr_url); ?>" style="width:200px;height:200px;">
+            <p>Scan this QR in Google Authenticator / Authy:</p>
+            <img src="<?php echo esc_attr($qr_url); ?>" width="200" height="200" alt="TOTP QR">
 
             <h3>Manual Secret</h3>
             <code><?php echo esc_html($secret); ?></code>
 
             <h3>Backup Codes</h3>
-            <pre><?php echo esc_html(implode("\n", $backups)); ?></pre>
+            <pre><?php echo esc_html(implode("\n", $codes)); ?></pre>
 
             <h3>Verify Code</h3>
-
             <form id="fw-verify-form">
                 <input type="text" name="code" id="fw-totp-code">
                 <button class="button">Verify</button>
             </form>
 
             <pre id="fw-verify-result"></pre>
-
         </div>
-
-        <script>
-        (function($){
-            $('#fw-verify-form').on('submit', function(e){
-                e.preventDefault();
-                let fd = new FormData();
-                fd.append('action','fortresswp_verify_totp');
-                fd.append('code',$('#fw-totp-code').val());
-                fd.append('nonce','<?php echo wp_create_nonce('fortresswp_totp_nonce'); ?>');
-
-                fetch(ajaxurl,{method:'POST',body:fd})
-                     .then(r=>r.json())
-                     .then(j=>$('#fw-verify-result').text(JSON.stringify(j,null,2)));
-            });
-        })(jQuery);
-        </script>
         <?php
     }
-
 }
