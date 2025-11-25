@@ -145,11 +145,11 @@ class FW_TOTP {
      * Generate QR code URL using Google Charts API
      * (optional: can replace with a local QR library)
      */
-    public static function qr_code_url($otpauth, $size = 200) {
-        return 'https://chart.googleapis.com/chart?cht=qr&chs='
-            . intval($size) . 'x' . intval($size)
-            . '&chl=' . rawurlencode($otpauth);
-    }
+   public static function qr_code_url($otpauth, $size = 200) {
+    $s = intval($size);
+    return 'https://api.qrserver.com/v1/create-qr-code/?size=' . $s . 'x' . $s . '&data=' . rawurlencode($otpauth);
+}
+
 
     /**
      * AJAX endpoint — verify TOTP or backup code

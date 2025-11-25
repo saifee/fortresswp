@@ -5,7 +5,6 @@ class FW_Firewall {
 
     private static $inst;
 
-    /** Singleton */
     public static function instance() {
         if (!self::$inst) self::$inst = new self();
         return self::$inst;
@@ -13,28 +12,29 @@ class FW_Firewall {
 
     private function __construct() {}
 
-    /**
-     * BASIC FIREWALL
-     * Runs early on init (priority 1)
-     * Blocks:
-     *  - Blacklisted IPs
-     *  - Suspicious user agents
-     */
     public static function basic_firewall() {
 
         $opts = get_option(FortressWP::OPTION_KEY, []);
         $ip   = $_SERVER['REMOTE_ADDR'] ?? '0.0.0.0';
 
-        /** 1. Blocklisted IPs */
+        // External blocklist IPs
         $blocklist = FW_Signature_Manager::get_blocklist();
 
-        if ($ip && in_array($ip, $blocklist)) {
-            FW_Audit::log('firewall', 'Blocked IP via blocklist', ['ip' => $ip], 'critical');
+        // Manual blocklist IPs
+        $manual_ips = isset($opts['manual_block_ips'])
+            ? preg_split('/\r?\n/', $opts['manual_block_ips'])
+            : [];
+        $manual_ips = array_filter(array_map('trim', $manual_ips));
+
+        $all_block_ips = array_unique(array_merge($blocklist, $manual_ips));
+
+        if ($ip && in_array($ip, $all_block_ips, true)) {
+            FW_Audit::log('firewall', 'Blocked IP', ['ip' => $ip], 'critical');
             status_header(403);
-            wp_die('Forbidden – Your IP is blocked.');
+            wp_die('Forbidden — Your IP has been blocked by FortressWP.');
         }
 
-        /** 2. Block suspicious user agents */
+        // Block suspicious user agents
         $ua  = $_SERVER['HTTP_USER_AGENT'] ?? '';
         $uas = isset($opts['blocked_user_agents'])
             ? preg_split('/\r?\n/', $opts['blocked_user_agents'])
@@ -47,24 +47,33 @@ class FW_Firewall {
             if (stripos($ua, $pattern) !== false) {
                 FW_Audit::log('firewall', 'Blocked User Agent', ['ua' => $ua], 'warning');
                 status_header(403);
-                wp_die('Forbidden – Suspicious user agent.');
+                wp_die('Forbidden — Suspicious user agent blocked by FortressWP.');
             }
         }
     }
 
-    /**
-     * LOGIN RATE LIMITING
-     * Hooks into authenticate filter.
-     */
     public static function limit_login_attempts($user, $username, $password) {
-
-        // If WP already errored OR authenticated user is valid → do nothing
-        if (is_wp_error($user) || !empty($user)) {
-            return $user;
-        }
 
         $opts = get_option(FortressWP::OPTION_KEY, []);
         $ip   = $_SERVER['REMOTE_ADDR'] ?? 'unknown';
+
+        // Manual blocked usernames
+        $manual_users = isset($opts['manual_block_users'])
+            ? preg_split('/\r?\n/', $opts['manual_block_users'])
+            : [];
+        $manual_users = array_map('strtolower', array_filter(array_map('trim', $manual_users)));
+
+        if ($username && in_array(strtolower($username), $manual_users, true)) {
+            FW_Audit::log('login', 'Blocked username login attempt', [
+                'user' => $username,
+                'ip'   => $ip
+            ], 'warning');
+            return new WP_Error('fw_user_blocked', 'This account is blocked by FortressWP.');
+        }
+
+        if (is_wp_error($user) || !empty($user)) {
+            return $user;
+        }
 
         $max_attempts = intval($opts['max_login_attempts'] ?? 5);
         $lock_minutes = intval($opts['lockout_minutes'] ?? 15);
@@ -72,7 +81,6 @@ class FW_Firewall {
         $attempt_key = "fw_login_attempts_" . md5($ip);
         $lock_key    = "fw_login_locked_" . md5($ip);
 
-        /** Check if IP is locked */
         if (get_transient($lock_key)) {
             return new WP_Error(
                 'fw_locked',
@@ -80,41 +88,36 @@ class FW_Firewall {
             );
         }
 
-        /** Let WP verify username & password */
         $user = wp_authenticate_username_password(null, $username, $password);
 
-        /** On failed login → increment attempts */
         if (is_wp_error($user)) {
 
             $attempts = intval(get_transient($attempt_key) ?: 0) + 1;
             set_transient($attempt_key, $attempts, $lock_minutes * 60);
 
-            FW_Audit::log(
-                'login',
-                'Failed login attempt',
-                ['user' => $username, 'ip' => $ip, 'attempts' => $attempts],
-                'notice'
-            );
+            FW_Audit::log('login', 'Failed login attempt', [
+                'user' => $username,
+                'ip'   => $ip,
+                'attempts' => $attempts
+            ], 'notice');
 
-            /** Lock IP if limit reached */
             if ($attempts >= $max_attempts) {
                 set_transient($lock_key, true, $lock_minutes * 60);
-                FW_Audit::log(
-                    'login',
-                    'IP locked due to excessive failures',
-                    ['ip' => $ip],
-                    'warning'
-                );
+                FW_Audit::log('login', 'IP locked due to excessive failures', [
+                    'ip' => $ip
+                ], 'warning');
             }
 
             return $user;
         }
 
-        /** On successful login → reset counters */
         delete_transient($attempt_key);
         delete_transient($lock_key);
 
-        FW_Audit::log('login', 'Successful login', ['user' => $username, 'ip' => $ip], 'info');
+        FW_Audit::log('login', 'Successful login', [
+            'user' => $username,
+            'ip'   => $ip
+        ], 'info');
 
         return $user;
     }

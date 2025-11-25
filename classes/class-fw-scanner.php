@@ -16,96 +16,92 @@ class FW_Scanner {
         $opts = get_option(FortressWP::OPTION_KEY, []);
         $this->chunk_size = max(5, intval($opts['scan_chunk_size'] ?? 50));
 
-        if (class_exists('ActionScheduler')) {
-            add_action('fortresswp_as_chunk', [$this, 'as_process_chunk'], 10, 1);
-        }
-        add_action('fortresswp_process_cron_chunk', [$this, 'process_cron_chunk']);
-
-        // status AJAX
         add_action('wp_ajax_fortresswp_scan_status', [__CLASS__, 'ajax_scan_status']);
     }
 
     public static function queue_full_scan() {
+        $self = self::instance();
+        $self->run_immediate_scan();
+    }
 
-        $self  = self::instance();
-        $files = $self->gather_files_for_scan();
+    /** Synchronous full scan (runs immediately) */
+    private function run_immediate_scan() {
+
+        $files = $this->gather_files_for_scan();
         $total = count($files);
 
-        if ($total === 0) return;
+        if ($total === 0) {
+            update_option(self::STATUS_OPT, array(
+                'total'        => 0,
+                'processed'    => 0,
+                'current_file' => '',
+                'started_at'   => time(),
+                'updated_at'   => time(),
+                'done'         => true,
+            ), false);
+            return;
+        }
 
-        // Initialize status
         $status = array(
             'total'        => $total,
             'processed'    => 0,
             'current_file' => '',
             'started_at'   => time(),
             'updated_at'   => time(),
-            'done'         => false
+            'done'         => false,
         );
         update_option(self::STATUS_OPT, $status, false);
 
-        if (class_exists('ActionScheduler') && function_exists('as_enqueue_async_action')) {
-            $chunks = array_chunk($files, $self->chunk_size);
-            foreach ($chunks as $i => $chunk) {
-                as_enqueue_async_action('fortresswp_as_chunk', ['files' => $chunk, 'index' => $i]);
-            }
-            FW_Audit::log('scan', 'Scan queued via Action Scheduler', ['chunks' => count($chunks)]);
-            return;
-        }
-
-        update_option(FortressWP::SCAN_QUEUE_KEY, $files);
-        FW_Audit::log('scan', 'Scan queued via WP-Cron', ['files' => $total]);
-    }
-
-    public function as_process_chunk($args) {
-        $files = $args['files'] ?? [];
         foreach ($files as $file) {
             $this->scan_file($file);
         }
-        FW_Audit::log('scan', 'AS chunk processed', ['count' => count($files)]);
-    }
 
-    public function process_cron_chunk() {
-        $queue = get_option(FortressWP::SCAN_QUEUE_KEY, []);
-        if (empty($queue)) return;
-
-        $chunk = array_splice($queue, 0, $this->chunk_size);
-        foreach ($chunk as $file) {
-            $this->scan_file($file);
+        // Mark done
+        $status = get_option(self::STATUS_OPT, array());
+        if (is_array($status)) {
+            $status['done']       = true;
+            $status['updated_at'] = time();
+            update_option(self::STATUS_OPT, $status, false);
         }
 
-        if (empty($queue)) {
-            delete_option(FortressWP::SCAN_QUEUE_KEY);
-        } else {
-            update_option(FortressWP::SCAN_QUEUE_KEY, $queue);
-        }
-
-        FW_Audit::log('scan', 'WP-Cron chunk processed', [
-            'processed' => count($chunk),
-            'remaining' => count($queue)
-        ]);
+        FW_Audit::log('scan', 'Full scan completed', array(
+            'total_files' => $total,
+        ), 'info');
     }
 
+    /** Scan ABSPATH + plugins + themes, skip uploads & large binaries */
     private function gather_files_for_scan() {
-        $folders = [
+
+        $folders = array(
+            ABSPATH,
             WP_CONTENT_DIR . '/plugins',
             WP_CONTENT_DIR . '/themes',
-        ];
+        );
 
-        $files = [];
+        $files = array();
+
         foreach ($folders as $dir) {
             if (!is_dir($dir)) continue;
+
             $iterator = new RecursiveIteratorIterator(
-                new RecursiveDirectoryIterator($dir)
+                new RecursiveDirectoryIterator($dir, FilesystemIterator::SKIP_DOTS)
             );
+
             foreach ($iterator as $file) {
                 if (!$file->isFile()) continue;
+
                 $path = $file->getPathname();
-                if (filesize($path) <= 500000) {
-                    $files[] = $path;
-                }
+
+                // Skip uploads (usually media, large and not PHP)
+                if (strpos($path, WP_CONTENT_DIR . '/uploads') === 0) continue;
+
+                // Only scan reasonably sized files
+                if (filesize($path) > 800000) continue; // 800KB
+
+                $files[] = $path;
             }
         }
+
         return $files;
     }
 
@@ -113,9 +109,9 @@ class FW_Scanner {
         $st = get_option(self::STATUS_OPT, []);
         if (!is_array($st) || empty($st)) return;
 
-        $st['processed'] = intval($st['processed'] ?? 0) + 1;
+        $st['processed']    = intval($st['processed'] ?? 0) + 1;
         $st['current_file'] = $rel_file;
-        $st['updated_at'] = time();
+        $st['updated_at']   = time();
 
         if ($st['processed'] >= ($st['total'] ?? 0)) {
             $st['done'] = true;
@@ -126,14 +122,16 @@ class FW_Scanner {
 
     private function scan_file($file) {
         if (!is_file($file)) return;
-        if (filesize($file) > 500000) return;
+
+        $size = filesize($file);
+        if ($size === false || $size > 800000) return;
 
         $content = @file_get_contents($file);
         if ($content === false) return;
 
         $rel_file = str_replace(ABSPATH, '', $file);
 
-        // update progress
+        // update progress status
         $this->update_status_for_file($rel_file);
 
         // 1. Signature detection
@@ -148,10 +146,12 @@ class FW_Scanner {
             }
         }
 
-        // 2. Heuristic pattern check
+        // 2. Heuristic detection
         if (preg_match('/(eval\s*\(|base64_decode\s*\(|gzinflate\s*\(|shell_exec\s*\()/i', $content)) {
             $snippet = substr($content, 0, 3000);
-            FW_Audit::log('scan', 'Heuristic suspicious pattern', ['file' => $rel_file], 'notice');
+            FW_Audit::log('scan', 'Heuristic suspicious pattern', [
+                'file' => $rel_file
+            ], 'notice');
 
             // 3. AI analysis
             $ai = FW_AIClient::instance();
@@ -168,22 +168,23 @@ class FW_Scanner {
 
     public static function ajax_start_scan() {
         if (!current_user_can('manage_options')) {
-            wp_send_json_error(['message' => 'Permission denied']);
+            wp_send_json_error('You do not have permission to run scans.');
         }
         check_ajax_referer('fortresswp_scan_nonce', 'nonce');
         self::queue_full_scan();
-        wp_send_json_success(['message' => 'Scan queued']);
+        wp_send_json_success('Scan started. Refresh status below.');
     }
 
     public static function ajax_scan_status() {
         if (!current_user_can('manage_options')) {
-            wp_send_json_error(['message' => 'Permission denied']);
+            wp_send_json_error('Permission denied.');
         }
 
         $st = get_option(self::STATUS_OPT, []);
         if (!is_array($st) || empty($st)) {
             wp_send_json_success([
-                'running' => false
+                'running' => false,
+                'message' => 'No active scan.'
             ]);
         }
 
@@ -206,10 +207,9 @@ class FW_Scanner {
             'total'        => $total,
             'processed'    => $processed,
             'current_file' => $current,
-            'started_at'   => $started,
             'elapsed'      => $elapsed,
             'remaining'    => $remaining,
-            'percent'      => $percent
+            'percent'      => $percent,
         ]);
     }
 }

@@ -34,10 +34,15 @@ class FW_AdminUI {
             true
         );
 
+        $opts = get_option(FortressWP::OPTION_KEY, array());
+        $provider = $opts['ai_provider'] ?? 'openai';
+
         wp_localize_script('fortresswp-admin', 'fortresswp_admin', array(
             'scan_nonce'  => wp_create_nonce('fortresswp_scan_nonce'),
             'totp_nonce'  => wp_create_nonce('fortresswp_totp_nonce'),
-            'ajax_url'    => admin_url('admin-ajax.php')
+            'ajax_url'    => admin_url('admin-ajax.php'),
+            'ai_provider' => $provider,
+            'ai_endpoint' => $opts['ai_endpoint'] ?? '',
         ));
     }
 
@@ -67,7 +72,6 @@ class FW_AdminUI {
                 $v = sanitize_text_field($v);
                 $existing[$k] = in_array($v, $allowed_providers, true) ? $v : 'openai';
             } elseif ($k === 'ai_endpoint') {
-                // allow overriding endpoint (for custom provider)
                 $existing[$k] = esc_url_raw($v);
             }
         }
@@ -76,7 +80,6 @@ class FW_AdminUI {
     }
 
     public function register_menu() {
-        // Top-level like Wordfence
         add_menu_page(
             'FortressWP Security',
             'FortressWP',
@@ -115,6 +118,15 @@ class FW_AdminUI {
 
         add_submenu_page(
             'fortresswp_dashboard',
+            'Scan Reports',
+            'Reports',
+            'manage_options',
+            'fortresswp_reports',
+            array($this, 'page_reports')
+        );
+
+        add_submenu_page(
+            'fortresswp_dashboard',
             'TOTP 2FA',
             'TOTP 2FA',
             'manage_options',
@@ -134,17 +146,15 @@ class FW_AdminUI {
 
     /* ========== PAGES ========== */
 
-    /** Simple dashboard – you can expand this later */
     public function page_dashboard() {
         if (!current_user_can('manage_options')) return; ?>
         <div class="wrap fortresswp-wrap">
             <h1>FortressWP — Dashboard</h1>
-            <p>Welcome to FortressWP. Use the Scan, Firewall, TOTP, and Settings pages from the menu.</p>
+            <p>Welcome to FortressWP. Use the Scan, Firewall, Reports, TOTP 2FA, and Settings tabs from the menu.</p>
         </div>
         <?php
     }
 
-    /** Settings page: AI + advanced options */
     public function page_settings() {
         if (!current_user_can('manage_options')) return;
         $opts = get_option(FortressWP::OPTION_KEY, array());
@@ -180,7 +190,7 @@ class FW_AdminUI {
                                class="regular-text"
                                value="<?php echo esc_attr($opts['ai_endpoint'] ?? ''); ?>">
                         <p class="description">
-                            This will auto-fill for known providers; override only if using "Custom Endpoint".
+                            For non-custom providers this will auto-fill. Only editable when "Custom Endpoint" is selected.
                         </p>
                     </td>
                 </tr>
@@ -204,7 +214,6 @@ class FW_AdminUI {
                                   rows="4" class="large-text code"><?php
                             echo esc_textarea($opts['signature_sources'] ?? '');
                         ?></textarea>
-                        <p class="description">One URL per line, each returning a list of malware signatures.</p>
                     </td>
                 </tr>
 
@@ -215,7 +224,6 @@ class FW_AdminUI {
                                   rows="4" class="large-text code"><?php
                             echo esc_textarea($opts['blocklist_sources'] ?? '');
                         ?></textarea>
-                        <p class="description">One URL per line, each returning a list of malicious IPs.</p>
                     </td>
                 </tr>
 
@@ -226,7 +234,6 @@ class FW_AdminUI {
                                name="<?php echo FortressWP::OPTION_KEY; ?>[scan_chunk_size]"
                                value="<?php echo intval($opts['scan_chunk_size'] ?? 50); ?>"
                                min="5" max="500">
-                        <p class="description">How many files to scan per background chunk.</p>
                     </td>
                 </tr>
 
@@ -268,14 +275,13 @@ class FW_AdminUI {
         <?php
     }
 
-    /** Scan page (separate tab) */
     public function page_scan() {
         if (!current_user_can('manage_options')) return;
         ?>
         <div class="wrap fortresswp-wrap">
             <h1>FortressWP — Malware Scanner</h1>
 
-            <p>Run a background scan of plugins and themes. Progress is shown live below.</p>
+            <p>Run a full scan of your WordPress root, plugins and themes. Progress will be displayed below.</p>
 
             <button id="fw-run-scan" class="button button-primary">Start Scan</button>
             <button id="fw-update-sigs" class="button">Update Signatures</button>
@@ -290,12 +296,11 @@ class FW_AdminUI {
                 <div>Current file: <span id="fw-scan-current"></span></div>
             </div>
 
-            <pre id="fw-msg"></pre>
+            <div id="fw-msg" class="fw-msg"></div>
         </div>
         <?php
     }
 
-    /** Firewall / block UI page */
     public function page_firewall() {
         if (!current_user_can('manage_options')) return;
         $opts = get_option(FortressWP::OPTION_KEY, array());
@@ -307,7 +312,7 @@ class FW_AdminUI {
             <?php settings_fields(FortressWP::OPTION_KEY); ?>
 
             <h2>Manual IP Block List</h2>
-            <p>Each IP on a separate line. These are blocked in addition to external blocklists.</p>
+            <p>Each IP on a separate line. These IPs will always be blocked.</p>
             <textarea name="<?php echo FortressWP::OPTION_KEY; ?>[manual_block_ips]"
                       rows="8" class="large-text code"><?php
                 echo esc_textarea($opts['manual_block_ips'] ?? '');
@@ -326,7 +331,49 @@ class FW_AdminUI {
         <?php
     }
 
-    /** TOTP page (unchanged except using existing FW_TOTP) */
+    public function page_reports() {
+        if (!current_user_can('manage_options')) return;
+
+        $logs = FW_Audit::get_recent(300);
+        // filter only scan-related logs
+        $scan_logs = array_filter($logs, function($row){
+            return isset($row['type']) && $row['type'] === 'scan';
+        });
+        ?>
+        <div class="wrap fortresswp-wrap">
+            <h1>FortressWP — Scan Reports</h1>
+            <p>Below are recent scan events with as much detail as possible.</p>
+
+            <table class="widefat fixed striped">
+                <thead>
+                    <tr>
+                        <th>Time</th>
+                        <th>Message</th>
+                        <th>Severity</th>
+                        <th>Details</th>
+                    </tr>
+                </thead>
+                <tbody>
+                <?php if (empty($scan_logs)) : ?>
+                    <tr><td colspan="4">No scan reports yet.</td></tr>
+                <?php else : ?>
+                    <?php foreach ($scan_logs as $row) : ?>
+                        <tr>
+                            <td><?php echo esc_html($row['time'] ?? ''); ?></td>
+                            <td><?php echo esc_html($row['message'] ?? $row['msg'] ?? ''); ?></td>
+                            <td><?php echo esc_html($row['severity'] ?? 'info'); ?></td>
+                            <td>
+                                <pre><?php echo esc_html(print_r($row['meta'] ?? array(), true)); ?></pre>
+                            </td>
+                        </tr>
+                    <?php endforeach; ?>
+                <?php endif; ?>
+                </tbody>
+            </table>
+        </div>
+        <?php
+    }
+
     public function page_totp() {
         if (!current_user_can('manage_options')) return;
 

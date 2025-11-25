@@ -3,7 +3,7 @@
 Plugin Name: FortressWP — by Saifullah Khalid & Kingslee Inc
 Plugin URI: https://kingslee.net
 Description: FortressWP security plugin (firewall, scanner, AI-assisted analysis, TOTP 2FA, signatures, blocklists).
-Version: 1.1.1
+Version: 1.2.1
 Author: Saifullah Khalid (Kingslee Inc)
 Author URI: mailto:me@saifullahkhalid.com
 License: GPLv2 or later
@@ -12,7 +12,7 @@ Text Domain: fortresswp
 
 if (!defined('ABSPATH')) exit;
 
-define('FORTRESSWP_VERSION', '1.1.1');
+define('FORTRESSWP_VERSION', '1.2.1');
 define('FORTRESSWP_DIR', plugin_dir_path(__FILE__));
 define('FORTRESSWP_URL', plugin_dir_url(__FILE__));
 
