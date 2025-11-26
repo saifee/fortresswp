@@ -91,6 +91,28 @@
             applyAIProviderDefaults();
         }
 
+        // Stop scan
+        $('#fw-stop-scan').on('click', function(e){
+            e.preventDefault();
+            if (!confirm('Are you sure you want to stop the scan?')) return;
+            var fd = new FormData();
+            fd.append('action', 'fortresswp_abort_scan');
+
+            fetch(fortresswp_admin.ajax_url, {
+                method: 'POST',
+                body: fd,
+                credentials: 'same-origin'
+            })
+            .then(r => r.json())
+            .then(function(data){
+                humanMessage('#fw-msg', 'Scan stopped successfully.', 'success');
+                setTimeout(function(){ location.reload(); }, 1500);
+            })
+            .catch(function(err){
+                humanMessage('#fw-msg', 'Error stopping scan: ' + err, 'error');
+            });
+        });
+
         // Start scan
         $('#fw-run-scan').on('click', function(e){
             e.preventDefault();

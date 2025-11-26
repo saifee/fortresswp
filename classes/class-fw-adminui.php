@@ -150,7 +150,44 @@ class FW_AdminUI {
         if (!current_user_can('manage_options')) return; ?>
         <div class="wrap fortresswp-wrap">
             <h1>FortressWP — Dashboard</h1>
-            <p>Welcome to FortressWP. Use the Scan, Firewall, Reports, TOTP 2FA, and Settings tabs from the menu.</p>
+            <p>Welcome to FortressWP. Access your security tools below:</p>
+
+            <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 15px; margin-top: 20px;">
+                <a href="?page=fortresswp_scan" class="fw-dashboard-btn" style="padding: 20px; background: #0073aa; color: white; text-decoration: none; border-radius: 5px; text-align: center; font-weight: bold; display: flex; flex-direction: column; justify-content: center; align-items: center; min-height: 100px;">
+                    <span style="font-size: 32px; margin-bottom: 10px;">🔍</span>
+                    <span>Malware Scanner</span>
+                </a>
+
+                <a href="?page=fortresswp_firewall" class="fw-dashboard-btn" style="padding: 20px; background: #46b450; color: white; text-decoration: none; border-radius: 5px; text-align: center; font-weight: bold; display: flex; flex-direction: column; justify-content: center; align-items: center; min-height: 100px;">
+                    <span style="font-size: 32px; margin-bottom: 10px;">🛡️</span>
+                    <span>Firewall & Blocking</span>
+                </a>
+
+                <a href="?page=fortresswp_reports" class="fw-dashboard-btn" style="padding: 20px; background: #e27730; color: white; text-decoration: none; border-radius: 5px; text-align: center; font-weight: bold; display: flex; flex-direction: column; justify-content: center; align-items: center; min-height: 100px;">
+                    <span style="font-size: 32px; margin-bottom: 10px;">📊</span>
+                    <span>Scan Reports</span>
+                </a>
+
+                <a href="?page=fortresswp_totp" class="fw-dashboard-btn" style="padding: 20px; background: #8b5ade; color: white; text-decoration: none; border-radius: 5px; text-align: center; font-weight: bold; display: flex; flex-direction: column; justify-content: center; align-items: center; min-height: 100px;">
+                    <span style="font-size: 32px; margin-bottom: 10px;">🔐</span>
+                    <span>TOTP 2FA</span>
+                </a>
+
+                <a href="?page=fortresswp_settings" class="fw-dashboard-btn" style="padding: 20px; background: #666; color: white; text-decoration: none; border-radius: 5px; text-align: center; font-weight: bold; display: flex; flex-direction: column; justify-content: center; align-items: center; min-height: 100px;">
+                    <span style="font-size: 32px; margin-bottom: 10px;">⚙️</span>
+                    <span>Settings</span>
+                </a>
+            </div>
+
+            <div style="margin-top: 30px; padding: 15px; background: #f0f0f0; border-left: 4px solid #0073aa; border-radius: 3px;">
+                <h3>Quick Start</h3>
+                <ul style="margin: 0; padding-left: 20px;">
+                    <li><strong>First Time?</strong> Go to <strong>Settings</strong> to configure your AI provider and security rules.</li>
+                    <li><strong>Run a Scan:</strong> Click <strong>Malware Scanner</strong> to start scanning your WordPress installation.</li>
+                    <li><strong>Review Results:</strong> Check <strong>Scan Reports</strong> for detailed threat information.</li>
+                    <li><strong>Enable 2FA:</strong> Set up TOTP two-factor authentication for admin accounts.</li>
+                </ul>
+            </div>
         </div>
         <?php
     }
@@ -284,6 +321,7 @@ class FW_AdminUI {
             <p>Run a full scan of your WordPress root, plugins and themes. Progress will be displayed below.</p>
 
             <button id="fw-run-scan" class="button button-primary">Start Scan</button>
+            <button id="fw-stop-scan" class="button button-secondary" style="margin-left:10px;">Stop Scan</button>
             <button id="fw-update-sigs" class="button">Update Signatures</button>
             <button id="fw-update-blk" class="button">Update Blocklist</button>
 
@@ -327,6 +365,53 @@ class FW_AdminUI {
 
             <?php submit_button('Save Firewall Rules'); ?>
             </form>
+
+            <h2>Login Attempts</h2>
+            <p>Failed login attempts recorded by FortressWP.</p>
+
+            <table class="widefat striped">
+                <thead>
+                    <tr>
+                        <th>Time</th>
+                        <th>Username</th>
+                        <th>IP Address</th>
+                        <th>Attempts</th>
+                        <th>Status</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <?php
+                    $login_logs = array_filter(FW_Audit::get_recent(200), function($row){
+                        return isset($row['type']) && $row['type'] === 'login';
+                    });
+
+                    if (empty($login_logs)) {
+                        echo "<tr><td colspan='5'>No login failures recorded.</td></tr>";
+                    } else {
+                        $seen = array();
+                        foreach ($login_logs as $row) {
+                            $ip = esc_html($row['meta']['ip'] ?? '(unknown)');
+                            $user = esc_html($row['meta']['user'] ?? '(unknown)');
+                            $key = $ip . '|' . $user;
+                            
+                            if (isset($seen[$key])) continue; // Skip duplicates
+                            $seen[$key] = true;
+                            
+                            $msg = $row['message'] ?? '';
+                            $status = (stripos($msg, 'blocked') !== false || stripos($msg, 'locked') !== false) ? 'Blocked' : 'Failed';
+                            
+                            echo "<tr>";
+                            echo "<td>" . esc_html($row['time'] ?? '') . "</td>";
+                            echo "<td>" . $user . "</td>";
+                            echo "<td>" . $ip . "</td>";
+                            echo "<td>" . esc_html($row['meta']['attempts'] ?? '1') . "</td>";
+                            echo "<td>" . $status . "</td>";
+                            echo "</tr>";
+                        }
+                    }
+                    ?>
+                </tbody>
+            </table>
         </div>
         <?php
     }
@@ -363,7 +448,24 @@ class FW_AdminUI {
                             <td><?php echo esc_html($row['message'] ?? $row['msg'] ?? ''); ?></td>
                             <td><?php echo esc_html($row['severity'] ?? 'info'); ?></td>
                             <td>
-                                <pre><?php echo esc_html(print_r($row['meta'] ?? array(), true)); ?></pre>
+                                <?php if (!empty($row['meta']['file']) && !empty($row['meta']['sig'])): ?>
+                                    <strong>File:</strong> <?php echo esc_html($row['meta']['file']); ?><br>
+                                    <strong>Signature Match:</strong> "<?php echo esc_html($row['meta']['sig']); ?>"<br>
+                                <?php elseif (!empty($row['meta']['file'])): ?>
+                                    <strong>File:</strong> <?php echo esc_html($row['meta']['file']); ?><br>
+                                <?php endif; ?>
+                                
+                                <?php if (!empty($row['meta']['total_files'])): ?>
+                                    <strong>Total Files Scanned:</strong> <?php echo esc_html($row['meta']['total_files']); ?><br>
+                                <?php endif; ?>
+                                
+                                <?php if (!empty($row['meta']['details'])): ?>
+                                    <strong>Details:</strong> <?php echo esc_html($row['meta']['details']); ?><br>
+                                <?php endif; ?>
+                                
+                                <?php if (!empty($row['meta']['error'])): ?>
+                                    <strong>Error:</strong> <?php echo esc_html($row['meta']['error']); ?><br>
+                                <?php endif; ?>
                             </td>
                         </tr>
                     <?php endforeach; ?>

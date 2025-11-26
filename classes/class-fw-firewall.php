@@ -10,7 +10,10 @@ class FW_Firewall {
         return self::$inst;
     }
 
-    private function __construct() {}
+    private function __construct() {
+        add_action('wp_loaded', array('FW_Firewall', 'basic_firewall'), 1);
+        add_filter('authenticate', array('FW_Firewall', 'limit_login_attempts'), 10, 3);
+    }
 
     public static function basic_firewall() {
 

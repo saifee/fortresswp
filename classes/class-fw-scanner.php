@@ -6,6 +6,7 @@ class FW_Scanner {
     private static $inst;
     private $chunk_size = 50;
     const STATUS_OPT = 'fortresswp_scan_status';
+    const ABORT_OPT = 'fortresswp_abort_scan';
 
     public static function instance() {
         if (!self::$inst) self::$inst = new self();
@@ -22,6 +23,12 @@ class FW_Scanner {
     public static function queue_full_scan() {
         $self = self::instance();
         $self->run_immediate_scan();
+    }
+
+    public static function abort_scan() {
+        update_option(self::ABORT_OPT, true);
+        delete_option('fortresswp_scan_queue');
+        FW_Audit::log('scan', 'Scan manually stopped by admin', array(), 'info');
     }
 
     /** Synchronous full scan (runs immediately) */
@@ -53,6 +60,11 @@ class FW_Scanner {
         update_option(self::STATUS_OPT, $status, false);
 
         foreach ($files as $file) {
+            if (get_option(self::ABORT_OPT)) {
+                delete_option(self::ABORT_OPT);
+                FW_Audit::log('scan', 'Scan aborted by admin', array(), 'info');
+                return;
+            }
             $this->scan_file($file);
         }
 
@@ -121,6 +133,8 @@ class FW_Scanner {
     }
 
     private function scan_file($file) {
+        if (get_option(self::ABORT_OPT)) return;
+        
         if (!is_file($file)) return;
 
         $size = filesize($file);
@@ -211,5 +225,14 @@ class FW_Scanner {
             'remaining'    => $remaining,
             'percent'      => $percent,
         ]);
+    }
+
+    public static function ajax_abort_scan() {
+        if (!current_user_can('manage_options')) {
+            wp_send_json_error('Permission denied.');
+        }
+
+        self::abort_scan();
+        wp_send_json_success('Scan aborted.');
     }
 }
